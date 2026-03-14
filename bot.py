@@ -5,7 +5,6 @@ import sqlite3
 import warnings
 import html
 import asyncio
-import logging
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -16,29 +15,22 @@ from telegram.ext import (
 # Отключаем предупреждения PTB
 warnings.filterwarnings("ignore", category=UserWarning, module="telegram.ext")
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# ⚠️ ТОЛЬКО через переменную окружения! Не храните токен в коде!
+# 🔐 ТОЛЬКО через переменную окружения — без fallback!
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не найден в переменных окружения!")
+    raise RuntimeError("❌ BOT_TOKEN не найден в переменных окружения!")
 
-# Админ ID (ваш Telegram user ID)
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Укажите ваш ID
+# 👑 Ваш Telegram ID для админ-прав
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Путь к БД
+# Путь к БД для Bothost
 DB_PATH = "/app/data/finance.db" if os.path.exists("/app/data") else "finance.db"
 
 DEFAULT_WALLETS = ["Наличные", "Сбер", "Тинькофф", "Альфа"]
 CATEGORIES_EXPENSE = ["Еда", "Транспорт", "Дом", "Связь", "Здоровье", "Развлечения", "Другое"]
 CATEGORIES_INCOME = ["Зарплата", "Подработка", "Подарок", "Возврат", "Другое"]
 
-# ---- Состояния (States) ----
+# Состояния (States)
 (
     ADD_AMOUNT, ADD_WALLET, ADD_CATEGORY, ADD_NOTE, ADD_CONFIRM,
     CAT_ADD_NAME, CAT_DEL_PICK,
@@ -47,9 +39,8 @@ CATEGORIES_INCOME = ["Зарплата", "Подработка", "Подарок
     W_ADD_NAME, W_ARCH_PICK,
     DEBT_MENU, DEBT_NAME, DEBT_AMOUNT, DEBT_WALLET,
     DEBT_PAY_PICK, DEBT_PAY_AMOUNT, DEBT_PAY_WALLET,
-    DEBT_ADJ_PICK, DEBT_ADJ_TARGET, DEBT_ADJ_NOTE, DEBT_ADJ_CONFIRM,
-    ADMIN_MENU, ADMIN_USERS, ADMIN_BLOCK
-) = range(32)
+    DEBT_ADJ_PICK, DEBT_ADJ_TARGET, DEBT_ADJ_NOTE, DEBT_ADJ_CONFIRM
+) = range(29)
 
 # ---------------- База Данных ----------------
 def get_db_connection():
@@ -58,21 +49,9 @@ def get_db_connection():
     return conn
 
 def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = get_db_connection()
     try:
-        # Таблица пользователей с правами доступа
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY,
-            telegram_id INTEGER UNIQUE NOT NULL,
-            username TEXT,
-            is_blocked INTEGER NOT NULL DEFAULT 0,
-            is_admin INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            last_seen TEXT
-        )
-        """)
-        
         conn.execute("""
         CREATE TABLE IF NOT EXISTS wallets(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,7 +62,6 @@ def init_db():
             UNIQUE(user_id, name)
         )
         """)
-        
         conn.execute("""
         CREATE TABLE IF NOT EXISTS categories(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,7 +73,6 @@ def init_db():
             UNIQUE(user_id, ttype, name)
         )
         """)
-        
         conn.execute("""
         CREATE TABLE IF NOT EXISTS debts(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,7 +85,6 @@ def init_db():
             created_at TEXT NOT NULL
         )
         """)
-        
         conn.execute("""
         CREATE TABLE IF NOT EXISTS transactions(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,60 +101,6 @@ def init_db():
             FOREIGN KEY(debt_id) REFERENCES debts(id)
         )
         """)
-        
-        conn.commit()
-    finally:
-        conn.close()
-
-def register_user(user_id: int, username: str = None):
-    """Регистрация/обновление пользователя"""
-    conn = get_db_connection()
-    try:
-        now = datetime.now().isoformat(timespec="seconds")
-        # Проверяем есть ли пользователь
-        existing = conn.execute("SELECT id, is_blocked FROM users WHERE telegram_id=?", (user_id,)).fetchone()
-        
-        if existing:
-            # Обновляем last_seen и разблокируем если был заблокирован админом (но не навсегда)
-            if not existing[1]:  # Если не заблокирован
-                conn.execute("UPDATE users SET last_seen=?, username=? WHERE telegram_id=?", (now, username, user_id))
-            return not existing[1]  # Возвращаем True если не заблокирован
-        else:
-            # Новый пользователь
-            is_admin = 1 if user_id == ADMIN_ID else 0
-            conn.execute(
-                "INSERT INTO users(telegram_id, username, is_admin, created_at, last_seen) VALUES (?,?,?,?,?)",
-                (user_id, username, is_admin, now, now)
-            )
-            conn.commit()
-            return True
-    finally:
-        conn.close()
-
-def is_user_blocked(user_id: int) -> bool:
-    """Проверка блокировки пользователя"""
-    conn = get_db_connection()
-    try:
-        result = conn.execute("SELECT is_blocked FROM users WHERE telegram_id=?", (user_id,)).fetchone()
-        return bool(result and result[0])
-    finally:
-        conn.close()
-
-def get_all_users():
-    """Получить всех пользователей (для админа)"""
-    conn = get_db_connection()
-    try:
-        return conn.execute(
-            "SELECT telegram_id, username, is_blocked, is_admin, created_at, last_seen FROM users ORDER BY created_at DESC"
-        ).fetchall()
-    finally:
-        conn.close()
-
-def block_user(user_id: int, blocked: bool):
-    """Блокировка/разблокировка пользователя"""
-    conn = get_db_connection()
-    try:
-        conn.execute("UPDATE users SET is_blocked=? WHERE telegram_id=?", (1 if blocked else 0, user_id))
         conn.commit()
     finally:
         conn.close()
@@ -188,35 +110,29 @@ def seed_db(user_id: int):
     conn = get_db_connection()
     try:
         for name in DEFAULT_WALLETS:
-            conn.execute("INSERT OR IGNORE INTO wallets(user_id, name, is_active, created_at) VALUES (?,?,1,?)", 
-                        (user_id, name, now))
+            conn.execute("INSERT OR IGNORE INTO wallets(user_id, name, is_active, created_at) VALUES (?,?,1,?)", (user_id, name, now))
         for n in CATEGORIES_EXPENSE:
-            conn.execute("INSERT OR IGNORE INTO categories(user_id, ttype, name, is_active, created_at) VALUES (?,?,?,?,?)", 
-                        (user_id, "expense", n, 1, now))
+            conn.execute("INSERT OR IGNORE INTO categories(user_id, ttype, name, is_active, created_at) VALUES (?,?,?,?,?)", (user_id, "expense", n, 1, now))
         for n in CATEGORIES_INCOME:
-            conn.execute("INSERT OR IGNORE INTO categories(user_id, ttype, name, is_active, created_at) VALUES (?,?,?,?,?)", 
-                        (user_id, "income", n, 1, now))
+            conn.execute("INSERT OR IGNORE INTO categories(user_id, ttype, name, is_active, created_at) VALUES (?,?,?,?,?)", (user_id, "income", n, 1, now))
         conn.commit()
     finally:
         conn.close()
 
 # ---------------- Вспомогательные функции ----------------
 def money_parse(text: str):
-    if not text: 
+    if not text:
         return None
     t = text.strip().replace(" ", "").replace(",", ".")
-    if not re.fullmatch(r"\d+(.\d{1,2})?", t):
+    if not re.fullmatch(r"\d+(\.\d{1,2})?", t):
         return None
     val = float(t)
-    if val < 0:
-        return None
-    return val
+    return val if val >= 0 else None
 
 def get_wallets(user_id: int, active_only=True):
     conn = get_db_connection()
     try:
-        query = "SELECT id, name FROM wallets WHERE user_id=? AND is_active=1 ORDER BY id" if active_only \
-                else "SELECT id, name, is_active FROM wallets WHERE user_id=? ORDER BY id"
+        query = "SELECT id, name FROM wallets WHERE user_id=? AND is_active=1 ORDER BY id" if active_only else "SELECT id, name, is_active FROM wallets WHERE user_id=? ORDER BY id"
         return conn.execute(query, (user_id,)).fetchall()
     finally:
         conn.close()
@@ -224,14 +140,8 @@ def get_wallets(user_id: int, active_only=True):
 def wallet_balance(user_id: int, wallet_id: int) -> float:
     conn = get_db_connection()
     try:
-        inc = conn.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE user_id=? AND wallet_id=? AND ttype='income'", 
-            (user_id, wallet_id)
-        ).fetchone()[0]
-        exp = conn.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE user_id=? AND wallet_id=? AND ttype='expense'", 
-            (user_id, wallet_id)
-        ).fetchone()[0]
+        inc = conn.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE user_id=? AND wallet_id=? AND ttype='income'", (user_id, wallet_id)).fetchone()[0]
+        exp = conn.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE user_id=? AND wallet_id=? AND ttype='expense'", (user_id, wallet_id)).fetchone()[0]
         return float(inc) - float(exp)
     finally:
         conn.close()
@@ -242,40 +152,31 @@ def all_balances(user_id: int):
     for wid, name, is_active in wallets:
         bal = wallet_balance(user_id, wid)
         out.append((wid, name, bool(is_active), bal))
-        if is_active: 
+        if is_active:
             total += bal
     return out, total
 
 def get_categories(user_id: int, ttype: str):
     conn = get_db_connection()
     try:
-        return conn.execute(
-            "SELECT id, name FROM categories WHERE user_id=? AND ttype=? AND is_active=1 ORDER BY name", 
-            (user_id, ttype)
-        ).fetchall()
+        return conn.execute("SELECT id, name FROM categories WHERE user_id=? AND ttype=? AND is_active=1 ORDER BY name", (user_id, ttype)).fetchall()
     finally:
         conn.close()
 
 def get_month_name(m: int):
-    return ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", 
-            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"][m-1]
+    return ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"][m-1]
 
 # ---------------- Клавиатуры (Меню) ----------------
-def main_menu_kb(is_admin=False):
-    rows = [
+def main_menu_kb():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Операция", callback_data="menu:ops")],
-        [InlineKeyboardButton("👛 Кошельки", callback_data="menu:wallets"), 
-         InlineKeyboardButton("📊 Статистика", callback_data="menu:stats")],
+        [InlineKeyboardButton("👛 Кошельки", callback_data="menu:wallets"), InlineKeyboardButton("📊 Статистика", callback_data="menu:stats")],
         [InlineKeyboardButton("💳 Долги / Кредиты", callback_data="menu:debts")],
-    ]
-    if is_admin:
-        rows.append([InlineKeyboardButton("🔧 Админ-панель", callback_data="admin:menu")])
-    return InlineKeyboardMarkup(rows)
+    ])
 
 def ops_menu_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢➕ Доход", callback_data="ops:income"),
-         InlineKeyboardButton("🔴➖ Расход", callback_data="ops:expense")],
+        [InlineKeyboardButton("🟢➕ Доход", callback_data="ops:income"), InlineKeyboardButton("🔴➖ Расход", callback_data="ops:expense")],
         [InlineKeyboardButton("🔁 Перевод", callback_data="ops:transfer")],
         [InlineKeyboardButton("⬅ Назад в меню", callback_data="menu:home")],
     ])
@@ -290,7 +191,7 @@ def wallets_menu_kb():
 
 def cancel_kb(back_to_menu=True):
     rows = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]
-    if back_to_menu: 
+    if back_to_menu:
         rows.append([InlineKeyboardButton("🏠 Меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
 
@@ -299,16 +200,12 @@ def kb_confirm(note_exists: bool):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Сохранить", callback_data="confirm:save")],
         [InlineKeyboardButton(txt, callback_data="confirm:add_note")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="confirm:back"), 
-         InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+        [InlineKeyboardButton("⬅️ Назад", callback_data="confirm:back"), InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
     ])
 
 def kb_wallet_pick(user_id: int, prefix: str, add_back=True):
-    rows = [[InlineKeyboardButton(name, callback_data=f"{prefix}:{wid}")] 
-            for wid, name in get_wallets(user_id, True)]
-    back_row = [InlineKeyboardButton("⬅️ Назад", callback_data="back"), 
-                InlineKeyboardButton("❌ Отмена", callback_data="cancel")] if add_back \
-               else [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+    rows = [[InlineKeyboardButton(name, callback_data=f"{prefix}:{wid}")] for wid, name in get_wallets(user_id, True)]
+    back_row = [InlineKeyboardButton("⬅️ Назад", callback_data="back"), InlineKeyboardButton("❌ Отмена", callback_data="cancel")] if add_back else [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
     rows.append(back_row)
     return InlineKeyboardMarkup(rows)
 
@@ -317,73 +214,30 @@ def kb_categories(user_id: int, ttype: str):
     rows, row = [], []
     for cid, name in cats:
         row.append(InlineKeyboardButton(name, callback_data=f"catpick:{name}"))
-        if len(row) == 2: 
+        if len(row) == 2:
             rows.append(row)
             row = []
-    if row: 
+    if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("➕ Добавить статью", callback_data="cat:manage:add"), 
-                 InlineKeyboardButton("🗑 Удалить статью", callback_data="cat:manage:del")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back"), 
-                 InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+    rows.append([InlineKeyboardButton("➕ Добавить статью", callback_data="cat:manage:add"), InlineKeyboardButton("🗑 Удалить статью", callback_data="cat:manage:del")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back"), InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text="🏠 Главное меню:"):
-    user_id = update.effective_user.id
-    is_admin = (user_id == ADMIN_ID)
-    
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=main_menu_kb(is_admin), parse_mode="HTML")
+        await update.callback_query.edit_message_text(text, reply_markup=main_menu_kb(), parse_mode="HTML")
     else:
-        await update.message.reply_text(text, reply_markup=main_menu_kb(is_admin), parse_mode="HTML")
+        await update.message.reply_text(text, reply_markup=main_menu_kb(), parse_mode="HTML")
 
-# ---------------- ПРОВЕРКА ДОСТУПА ----------------
-async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Проверка доступа пользователя"""
-    user_id = update.effective_user.id
-    username = update.effective_user.username
-    
-    # Регистрируем пользователя если новый
-    if not register_user(user_id, username):
-        await update.message.reply_text("❌ Вы заблокированы администратором.")
-        return False
-    
-    if is_user_blocked(user_id):
-        await update.message.reply_text("❌ Вы заблокированы администратором.")
-        return False
-    
-    return True
-
-# ---------------- СТАРТ ----------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Жесткий сброс всего и вывод меню"""
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username
-    
-    if not register_user(user_id, username):
-        await update.message.reply_text("❌ Вы заблокированы администратором.")
-        return ConversationHandler.END
-    
-    if is_user_blocked(user_id):
-        await update.message.reply_text("❌ Вы заблокированы администратором.")
-        return ConversationHandler.END
-    
     context.user_data.clear()
-    await asyncio.to_thread(seed_db, user_id)
+    await asyncio.to_thread(seed_db, update.message.from_user.id)
     await show_menu(update, context, "Привет! Я помогу тебе вести учет финансов 💸\nВыбери действие:")
     return ConversationHandler.END
 
 async def unknown_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ловит любой левый текст вне сценариев"""
-    if not await check_access(update, context):
-        return ConversationHandler.END
-    
-    await update.message.reply_text(
-        "Я не понимаю текстовые сообщения вне команд.\nПожалуйста, воспользуйтесь кнопками меню 👇", 
-        reply_markup=main_menu_kb(update.effective_user.id == ADMIN_ID), 
-        parse_mode="HTML"
-    )
+    await update.message.reply_text("Я не понимаю текстовые сообщения вне команд.\nПожалуйста, воспользуйтесь кнопками меню 👇", reply_markup=main_menu_kb(), parse_mode="HTML")
     return None
 
 async def on_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -391,59 +245,10 @@ async def on_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_menu(update, context, "Действие отменено ❌\nВыберите действие:")
     return ConversationHandler.END
 
-# ---------------- АДМИН ПАНЕЛЬ ----------------
-async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Админ панель"""
-    q = update.callback_query
-    await q.answer()
-    
-    if q.data == "admin:menu":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👥 Пользователи", callback_data="admin:users")],
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")]
-        ])
-        await q.edit_message_text("🔧 Админ-панель", reply_markup=kb, parse_mode="HTML")
-        return ADMIN_MENU
-    
-    if q.data == "admin:users":
-        users = get_all_users()
-        msg = "👥 <b>Все пользователи:</b>\n\n"
-        rows = []
-        
-        for telegram_id, username, is_blocked, is_admin, created, last_seen in users:
-            status = "🚫 Заблок." if is_blocked else "✅ Активен"
-            role = "👑 Админ" if is_admin else "👤 Пользователь"
-            uname = f"@{username}" if username else "без username"
-            msg += f"<code>{telegram_id}</code> {uname} {status} {role}\n"
-            
-            if telegram_id != ADMIN_ID:  # Нельзя блокировать себя
-                action = "Разблокировать" if is_blocked else "Заблокировать"
-                rows.append([InlineKeyboardButton(f"{action} {telegram_id}", callback_data=f"admin:block:{telegram_id}")])
-        
-        rows.append([InlineKeyboardButton("⬅ Назад", callback_data="admin:menu")])
-        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
-        return ADMIN_USERS
-    
-    if q.data.startswith("admin:block:"):
-        target_id = int(q.data.split(":")[2])
-        current_status = is_user_blocked(target_id)
-        block_user(target_id, not current_status)
-        action = "разблокирован" if current_status else "заблокирован"
-        await q.answer(f"Пользователь {action} ✅")
-        # Обновляем список
-        return await admin_menu(update, context)
-    
-    return ConversationHandler.END
-
 # ---------------- СТАТИСТИКА ----------------
 async def send_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE, year: int, month: int):
     q = update.callback_query
     user_id = q.from_user.id
-    
-    if is_user_blocked(user_id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
     start_str = f"{year}-{month:02d}-01T00:00:00"
     end_y, end_m = (year + 1, 1) if month == 12 else (year, month + 1)
     end_str = f"{end_y}-{end_m:02d}-01T00:00:00"
@@ -451,79 +256,55 @@ async def send_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE, ye
     def fetch_stats():
         conn = get_db_connection()
         try:
-            inc = conn.execute(
-                "SELECT category, SUM(amount) FROM transactions WHERE user_id=? AND ttype='income' "
-                "AND created_at >= ? AND created_at < ? AND category != 'Перевод' AND category != 'Корректировка' "
-                "GROUP BY category", (user_id, start_str, end_str)
-            ).fetchall()
-            exp = conn.execute(
-                "SELECT category, SUM(amount) FROM transactions WHERE user_id=? AND ttype='expense' "
-                "AND created_at >= ? AND created_at < ? AND category != 'Перевод' AND category != 'Корректировка' "
-                "GROUP BY category", (user_id, start_str, end_str)
-            ).fetchall()
+            inc = conn.execute("SELECT category, SUM(amount) FROM transactions WHERE user_id=? AND ttype='income' AND created_at >= ? AND created_at < ? AND category != 'Перевод' AND category != 'Корректировка' GROUP BY category", (user_id, start_str, end_str)).fetchall()
+            exp = conn.execute("SELECT category, SUM(amount) FROM transactions WHERE user_id=? AND ttype='expense' AND created_at >= ? AND created_at < ? AND category != 'Перевод' AND category != 'Корректировка' GROUP BY category", (user_id, start_str, end_str)).fetchall()
             return inc, exp
         finally:
             conn.close()
-
+    
     inc, exp = await asyncio.to_thread(fetch_stats)
-
+    
     msg = f"📊 <b>Статистика за {get_month_name(month)} {year}</b>\n"
     msg += "<b>🟢 Доходы:</b>\n"
     total_inc = sum(amt for cat, amt in inc)
     if inc:
-        for cat, amt in inc: 
+        for cat, amt in inc:
             msg += f" • {html.escape(cat)}: {amt:.2f}\n"
     else:
         msg += " Нет записей\n"
     msg += f"  <b>Итого:</b> {total_inc:.2f}\n\n"
-    
     msg += "<b>🔴 Расходы:</b>\n"
     total_exp = sum(amt for cat, amt in exp)
     if exp:
-        for cat, amt in exp: 
+        for cat, amt in exp:
             msg += f" • {html.escape(cat)}: {amt:.2f}\n"
     else:
         msg += " Нет записей\n"
     msg += f"  <b>Итого:</b> {total_exp:.2f}\n\n"
     msg += f"⚖️ <b>Баланс за период:</b> {total_inc - total_exp:.2f}"
-
+    
     prev_m = month - 1 if month > 1 else 12
     prev_y = year if month > 1 else year - 1
     next_m = month + 1 if month < 12 else 1
     next_y = year if month < 12 else year + 1
     
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Пред. месяц", callback_data=f"stat:{prev_y}:{prev_m}"),
-         InlineKeyboardButton("След. ➡️", callback_data=f"stat:{next_y}:{next_m}")],
+        [InlineKeyboardButton("⬅️ Пред. месяц", callback_data=f"stat:{prev_y}:{prev_m}"), InlineKeyboardButton("След. ➡️", callback_data=f"stat:{next_y}:{next_m}")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:home")]
     ])
     await q.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
-    return ConversationHandler.END
 
 # ---------------- ДОХОД / РАСХОД ----------------
 async def add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, preset_type: str):
     user_id = update.callback_query.from_user.id
-    
-    if is_user_blocked(user_id):
-        await update.callback_query.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
     await asyncio.to_thread(seed_db, user_id)
     context.user_data.clear()
     context.user_data["ttype"] = preset_type
     type_ru = "ДОХОД 🟢" if preset_type == "income" else "РАСХОД 🔴"
-    await update.callback_query.edit_message_text(
-        f"Вводим {type_ru}\nВведи сумму (например 350.50):", 
-        reply_markup=cancel_kb(False), 
-        parse_mode="HTML"
-    )
+    await update.callback_query.edit_message_text(f"Вводим {type_ru}\nВведи сумму (например 350.50):", reply_markup=cancel_kb(False), parse_mode="HTML")
     return ADD_AMOUNT
 
 async def add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     val = money_parse(update.message.text)
     if not val:
         await update.message.reply_text("Не понял сумму. Пример: 350 или 350.50:", reply_markup=cancel_kb(False))
@@ -535,12 +316,7 @@ async def add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_wallet_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     if q.data == "back":
         await q.edit_message_text("Введи сумму:", reply_markup=cancel_kb(False))
@@ -552,12 +328,7 @@ async def add_wallet_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_category_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     if q.data == "back":
         await q.edit_message_text("Выбери кошелёк:", reply_markup=kb_wallet_pick(q.from_user.id, "w", add_back=True))
@@ -571,45 +342,26 @@ async def add_category_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="catdel_back")])
         await q.edit_message_text("Какую статью удалить?", reply_markup=InlineKeyboardMarkup(rows))
         return CAT_DEL_PICK
-    
     context.user_data["category"] = q.data.split(":")[1]
     ttype_ru = "Расход 🔴" if context.user_data["ttype"] == "expense" else "Доход 🟢"
     note = html.escape(context.user_data.get('note') or "—")
-    await q.edit_message_text(
-        f"Проверим:\nТип: {ttype_ru}\nСумма: {context.user_data['amount']:.2f}\n"
-        f"Статья: {html.escape(context.user_data['category'])}\nКоммент: {note}\n\nСохранить?", 
-        reply_markup=kb_confirm(bool(context.user_data.get("note"))), 
-        parse_mode="HTML"
-    )
+    await q.edit_message_text(f"Проверим:\nТип: {ttype_ru}\nСумма: {context.user_data['amount']:.2f}\nСтатья: {html.escape(context.user_data['category'])}\nКоммент: {note}\n\nСохранить?", reply_markup=kb_confirm(bool(context.user_data.get("note"))), parse_mode="HTML")
     return ADD_CONFIRM
 
 async def cat_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     name = update.message.text.strip()
     conn = get_db_connection()
     try:
-        conn.execute(
-            "INSERT OR IGNORE INTO categories(user_id, ttype, name, is_active, created_at) VALUES (?,?,?,?,?)", 
-            (update.message.from_user.id, context.user_data["ttype"], name, 1, datetime.now().isoformat(timespec="seconds"))
-        )
+        conn.execute("INSERT OR IGNORE INTO categories(user_id, ttype, name, is_active, created_at) VALUES (?,?,?,?,?)", (update.message.from_user.id, context.user_data["ttype"], name, 1, datetime.now().isoformat(timespec="seconds")))
         conn.commit()
     finally:
         conn.close()
-    await update.message.reply_text("Статья добавлена! Теперь выбери её:", 
-                                    reply_markup=kb_categories(update.message.from_user.id, context.user_data["ttype"]))
+    await update.message.reply_text("Статья добавлена! Теперь выбери её:", reply_markup=kb_categories(update.message.from_user.id, context.user_data["ttype"]))
     return ADD_CATEGORY
 
 async def cat_del_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
     if q.data == "catdel_back":
         await q.edit_message_text("Выбери статью:", reply_markup=kb_categories(q.from_user.id, context.user_data["ttype"]))
         return ADD_CATEGORY
@@ -620,19 +372,13 @@ async def cat_del_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
     finally:
         conn.close()
-    await q.edit_message_text("Статья удалена. Выбери статью:", 
-                              reply_markup=kb_categories(q.from_user.id, context.user_data["ttype"]))
+    await q.edit_message_text("Статья удалена. Выбери статью:", reply_markup=kb_categories(q.from_user.id, context.user_data["ttype"]))
     return ADD_CATEGORY
 
 async def add_confirm_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     if q.data == "confirm:back":
         await q.edit_message_text("Выбери статью:", reply_markup=kb_categories(q.from_user.id, context.user_data["ttype"]))
@@ -644,58 +390,33 @@ async def add_confirm_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         now = datetime.now().isoformat(timespec="seconds")
         conn = get_db_connection()
         try:
-            conn.execute(
-                "INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, note, created_at) VALUES (?,?,?,?,?,?,?)",
-                (q.from_user.id, context.user_data["ttype"], context.user_data["amount"], 
-                 context.user_data["wallet_id"], context.user_data["category"], 
-                 context.user_data.get("note"), now)
-            )
+            conn.execute("INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, note, created_at) VALUES (?,?,?,?,?,?,?)", (q.from_user.id, context.user_data["ttype"], context.user_data["amount"], context.user_data["wallet_id"], context.user_data["category"], context.user_data.get("note"), now))
             conn.commit()
         finally:
             conn.close()
-        await q.edit_message_text("Операция сохранена ✅", reply_markup=main_menu_kb(q.from_user.id == ADMIN_ID))
+        await q.edit_message_text("Операция сохранена ✅", reply_markup=main_menu_kb())
         return ConversationHandler.END
 
 async def add_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     context.user_data["note"] = update.message.text.strip() or None
     ttype_ru = "Расход 🔴" if context.user_data["ttype"] == "expense" else "Доход 🟢"
     note = html.escape(context.user_data.get('note') or "—")
-    await update.message.reply_text(
-        f"Проверим:\nТип: {ttype_ru}\nСумма: {context.user_data['amount']:.2f}\n"
-        f"Статья: {html.escape(context.user_data['category'])}\nКоммент: {note}\n\nСохранить?", 
-        reply_markup=kb_confirm(True), 
-        parse_mode="HTML"
-    )
+    await update.message.reply_text(f"Проверим:\nТип: {ttype_ru}\nСумма: {context.user_data['amount']:.2f}\nСтатья: {html.escape(context.user_data['category'])}\nКоммент: {note}\n\nСохранить?", reply_markup=kb_confirm(True), parse_mode="HTML")
     return ADD_CONFIRM
 
 # ---------------- ПЕРЕВОД МЕЖДУ КОШЕЛЬКАМИ ----------------
 async def transfer_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.callback_query.from_user.id
-    
-    if is_user_blocked(user_id):
-        await update.callback_query.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
     await asyncio.to_thread(seed_db, user_id)
     context.user_data.clear()
     kb = kb_wallet_pick(user_id, "from", add_back=False)
-    await update.callback_query.edit_message_text("🔁 Перевод\nИз какого кошелька переводим?", 
-                                                   reply_markup=kb, parse_mode="HTML")
+    await update.callback_query.edit_message_text("🔁 Перевод\nИз какого кошелька переводим?", reply_markup=kb, parse_mode="HTML")
     return TR_FROM
 
 async def tr_pick_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     _, wid = q.data.split(":", 1)
     context.user_data["from_wallet_id"] = int(wid)
@@ -706,12 +427,7 @@ async def tr_pick_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tr_pick_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     if q.data == "back":
         kb = kb_wallet_pick(q.from_user.id, "from", add_back=False)
@@ -729,48 +445,27 @@ async def tr_pick_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return TR_AMOUNT
 
 async def tr_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     val = money_parse(update.message.text)
     if val is None:
         await update.message.reply_text("Не понял сумму. Пример: 1000 или 1000.50:", reply_markup=cancel_kb(False))
         return TR_AMOUNT
     context.user_data["amount"] = val
     note_show = html.escape(context.user_data.get("note") or "—")
-    await update.message.reply_text(
-        f"Перевод: {val:.2f}\nКомментарий: {note_show}\n\nСохранить?", 
-        reply_markup=kb_confirm(note_exists=bool(context.user_data.get("note"))), 
-        parse_mode="HTML"
-    )
+    await update.message.reply_text(f"Перевод: {val:.2f}\nКомментарий: {note_show}\n\nСохранить?", reply_markup=kb_confirm(note_exists=bool(context.user_data.get("note"))), parse_mode="HTML")
     return TR_CONFIRM
 
 async def tr_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     note = update.message.text.strip()
     context.user_data["note"] = note if note else None
     val = context.user_data["amount"]
     note_show = html.escape(context.user_data.get("note") or "—")
-    await update.message.reply_text(
-        f"Перевод: {val:.2f}\nКомментарий: {note_show}\n\nСохранить?", 
-        reply_markup=kb_confirm(note_exists=bool(context.user_data.get("note"))), 
-        parse_mode="HTML"
-    )
+    await update.message.reply_text(f"Перевод: {val:.2f}\nКомментарий: {note_show}\n\nСохранить?", reply_markup=kb_confirm(note_exists=bool(context.user_data.get("note"))), parse_mode="HTML")
     return TR_CONFIRM
 
 async def tr_confirm_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     if q.data == "confirm:back":
         await q.edit_message_text("Введи сумму перевода:", reply_markup=cancel_kb(False))
@@ -785,20 +480,12 @@ async def tr_confirm_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE)
         amt = context.user_data["amount"]
         conn = get_db_connection()
         try:
-            conn.execute(
-                "INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, note, transfer_id, created_at) VALUES (?,?,?,?,?,?,?,?)", 
-                (user_id, "expense", amt, context.user_data["from_wallet_id"], "Перевод", 
-                 context.user_data.get("note"), transfer_id, now)
-            )
-            conn.execute(
-                "INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, note, transfer_id, created_at) VALUES (?,?,?,?,?,?,?,?)", 
-                (user_id, "income", amt, context.user_data["to_wallet_id"], "Перевод", 
-                 context.user_data.get("note"), transfer_id, now)
-            )
+            conn.execute("INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, note, transfer_id, created_at) VALUES (?,?,?,?,?,?,?,?)", (user_id, "expense", amt, context.user_data["from_wallet_id"], "Перевод", context.user_data.get("note"), transfer_id, now))
+            conn.execute("INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, note, transfer_id, created_at) VALUES (?,?,?,?,?,?,?,?)", (user_id, "income", amt, context.user_data["to_wallet_id"], "Перевод", context.user_data.get("note"), transfer_id, now))
             conn.commit()
         finally:
             conn.close()
-        await q.edit_message_text("Перевод сохранён ✅", reply_markup=main_menu_kb(user_id == ADMIN_ID))
+        await q.edit_message_text("Перевод сохранён ✅", reply_markup=main_menu_kb())
         return ConversationHandler.END
 
 # ---------------- Долги и Кредиты ----------------
@@ -813,74 +500,50 @@ def kb_debts_menu():
 
 async def debts_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.callback_query.from_user.id if update.callback_query else update.message.from_user.id
-    
-    if is_user_blocked(user_id):
-        if update.callback_query:
-            await update.callback_query.answer("Вы заблокированы ❌", show_alert=True)
-        else:
-            await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     def fetch_debts():
         conn = get_db_connection()
         try:
-            my_debts = conn.execute(
-                "SELECT name, current_balance FROM debts WHERE user_id=? AND debt_type='my_debt' "
-                "AND is_active=1 AND current_balance > 0", (user_id,)
-            ).fetchall()
-            owed_me = conn.execute(
-                "SELECT name, current_balance FROM debts WHERE user_id=? AND debt_type='owed_to_me' "
-                "AND is_active=1 AND current_balance > 0", (user_id,)
-            ).fetchall()
+            my_debts = conn.execute("SELECT name, current_balance FROM debts WHERE user_id=? AND debt_type='my_debt' AND is_active=1 AND current_balance > 0", (user_id,)).fetchall()
+            owed_me = conn.execute("SELECT name, current_balance FROM debts WHERE user_id=? AND debt_type='owed_to_me' AND is_active=1 AND current_balance > 0", (user_id,)).fetchall()
             return my_debts, owed_me
         finally:
             conn.close()
-        
+    
     my_debts, owed_me = await asyncio.to_thread(fetch_debts)
-
+    
     msg = "💳 <b>Мои долги и кредиты (я должен):</b>\n"
-    msg += "\n".join([f"• {html.escape(n)}: {b:.2f}" for n,b in my_debts]) if my_debts else "• Нет активных долгов"
+    msg += "\n".join([f"• {html.escape(n)}: {b:.2f}" for n, b in my_debts]) if my_debts else "• Нет активных долгов"
     msg += "\n\n🤝 <b>Должны мне:</b>\n"
-    msg += "\n".join([f"• {html.escape(n)}: {b:.2f}" for n,b in owed_me]) if owed_me else "• Никто не должен"
-
-    if update.callback_query: 
+    msg += "\n".join([f"• {html.escape(n)}: {b:.2f}" for n, b in owed_me]) if owed_me else "• Никто не должен"
+    
+    if update.callback_query:
         await update.callback_query.edit_message_text(msg, reply_markup=kb_debts_menu(), parse_mode="HTML")
-    else: 
+    else:
         await update.message.reply_text(msg, reply_markup=kb_debts_menu(), parse_mode="HTML")
     return DEBT_MENU
 
 async def debt_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "menu:home": 
+    if q.data == "menu:home":
         return await show_menu(update, context)
     if q.data.startswith("debt:add:"):
         context.user_data["debt_type"] = q.data.split(":")[2]
-        txt = "Название кредита (например: Сбербанк Ипотека):" if context.user_data["debt_type"]=="my_debt" \
-              else "Кому даем в долг (Имя):"
+        txt = "Название кредита (например: Сбербанк Ипотека):" if context.user_data["debt_type"] == "my_debt" else "Кому даем в долг (Имя):"
         await q.edit_message_text(txt, reply_markup=cancel_kb(False))
         return DEBT_NAME
     if q.data == "debt:pay":
         def fetch_pay_debts():
             conn = get_db_connection()
             try:
-                return conn.execute(
-                    "SELECT id, name, current_balance FROM debts WHERE user_id=? AND is_active=1 AND current_balance > 0", 
-                    (q.from_user.id,)
-                ).fetchall()
+                return conn.execute("SELECT id, name, current_balance FROM debts WHERE user_id=? AND is_active=1 AND current_balance > 0", (q.from_user.id,)).fetchall()
             finally:
                 conn.close()
         debts = await asyncio.to_thread(fetch_pay_debts)
         if not debts:
             await q.edit_message_text("Нет активных долгов для оплаты.", reply_markup=kb_debts_menu())
             return DEBT_MENU
-        rows = [[InlineKeyboardButton(f"{html.escape(n)} ({b:.0f})", callback_data=f"dpay:{did}")] 
-                for did, n, b in debts]
+        rows = [[InlineKeyboardButton(f"{html.escape(n)} ({b:.0f})", callback_data=f"dpay:{did}")] for did, n, b in debts]
         rows.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         await q.edit_message_text("По какому долгу вносим платеж/возврат?", reply_markup=InlineKeyboardMarkup(rows))
         return DEBT_PAY_PICK
@@ -888,201 +551,134 @@ async def debt_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         def fetch_adj_debts():
             conn = get_db_connection()
             try:
-                return conn.execute(
-                    "SELECT id, name, current_balance FROM debts WHERE user_id=? AND is_active=1", 
-                    (q.from_user.id,)
-                ).fetchall()
+                return conn.execute("SELECT id, name, current_balance FROM debts WHERE user_id=? AND is_active=1", (q.from_user.id,)).fetchall()
             finally:
                 conn.close()
         debts = await asyncio.to_thread(fetch_adj_debts)
-
         if not debts:
             await q.edit_message_text("Нет долгов для корректировки.", reply_markup=kb_debts_menu())
             return DEBT_MENU
-        rows = [[InlineKeyboardButton(f"{html.escape(n)} ({b:.0f})", callback_data=f"dadj:{did}")] 
-                for did, n, b in debts]
+        rows = [[InlineKeyboardButton(f"{html.escape(n)} ({b:.0f})", callback_data=f"dadj:{did}")] for did, n, b in debts]
         rows.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         await q.edit_message_text("Выбери долг для корректировки:", reply_markup=InlineKeyboardMarkup(rows))
         return DEBT_ADJ_PICK
-    
-    return DEBT_MENU
 
 async def debt_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     context.user_data["debt_name"] = update.message.text.strip()
     await update.message.reply_text("Введите сумму долга:", reply_markup=cancel_kb(False))
     return DEBT_AMOUNT
 
 async def debt_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     val = money_parse(update.message.text)
     if not val:
         await update.message.reply_text("Не понял сумму. Пример: 10000", reply_markup=cancel_kb(False))
         return DEBT_AMOUNT
     context.user_data["debt_amount"] = val
-    txt = "На какой кошелек поступили деньги?" if context.user_data["debt_type"]=="my_debt" \
-          else "С какого кошелька дали в долг?"
+    txt = "На какой кошелек поступили деньги?" if context.user_data["debt_type"] == "my_debt" else "С какого кошелька дали в долг?"
     await update.message.reply_text(txt, reply_markup=kb_wallet_pick(update.message.from_user.id, "dw", add_back=False))
     return DEBT_WALLET
 
 async def debt_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     wid = int(q.data.split(":")[1])
     amt = context.user_data["debt_amount"]
     now = datetime.now().isoformat(timespec="seconds")
     conn = get_db_connection()
     try:
-        cur = conn.execute(
-            "INSERT INTO debts(user_id, debt_type, name, total_amount, current_balance, created_at) VALUES (?,?,?,?,?,?)", 
-            (q.from_user.id, context.user_data["debt_type"], context.user_data["debt_name"], amt, amt, now)
-        )
+        cur = conn.execute("INSERT INTO debts(user_id, debt_type, name, total_amount, current_balance, created_at) VALUES (?,?,?,?,?,?)", (q.from_user.id, context.user_data["debt_type"], context.user_data["debt_name"], amt, amt, now))
         debt_id = cur.lastrowid
         ttype = "income" if context.user_data["debt_type"] == "my_debt" else "expense"
-        conn.execute(
-            "INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, debt_id, created_at) VALUES (?,?,?,?,?,?,?)", 
-            (q.from_user.id, ttype, amt, wid, "Кредит/Долг", debt_id, now)
-        )
+        conn.execute("INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, debt_id, created_at) VALUES (?,?,?,?,?,?,?)", (q.from_user.id, ttype, amt, wid, "Кредит/Долг", debt_id, now))
         conn.commit()
     finally:
         conn.close()
-    await q.edit_message_text("Долг оформлен ✅", reply_markup=main_menu_kb(q.from_user.id == ADMIN_ID))
+    await q.edit_message_text("Долг оформлен ✅", reply_markup=main_menu_kb())
     return ConversationHandler.END
 
 async def debt_pay_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     context.user_data["pay_debt_id"] = int(q.data.split(":")[1])
     await q.edit_message_text("Сумма платежа/возврата:", reply_markup=cancel_kb(False))
     return DEBT_PAY_AMOUNT
 
 async def debt_pay_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     val = money_parse(update.message.text)
     if not val:
         await update.message.reply_text("Не понял сумму:", reply_markup=cancel_kb(False))
         return DEBT_PAY_AMOUNT
     context.user_data["pay_amount"] = val
-    await update.message.reply_text("С какого кошелька платим (или на какой вернули долг)?", 
-                                    reply_markup=kb_wallet_pick(update.message.from_user.id, "pw", add_back=False))
+    await update.message.reply_text("С какого кошелька платим (или на какой вернули долг)?", reply_markup=kb_wallet_pick(update.message.from_user.id, "pw", add_back=False))
     return DEBT_PAY_WALLET
 
 async def debt_pay_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     wid = int(q.data.split(":")[1])
     amt = context.user_data["pay_amount"]
     did = context.user_data["pay_debt_id"]
     now = datetime.now().isoformat(timespec="seconds")
-    
     def process_debt_payment():
         conn = get_db_connection()
         try:
             dtype = conn.execute("SELECT debt_type, current_balance FROM debts WHERE id=?", (did,)).fetchone()
-            if not dtype: 
+            if not dtype:
                 return None
             new_bal = max(0, dtype[1] - amt)
             conn.execute("UPDATE debts SET current_balance=? WHERE id=?", (new_bal, did))
             ttype = "expense" if dtype[0] == "my_debt" else "income"
-            conn.execute(
-                "INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, debt_id, created_at) VALUES (?,?,?,?,?,?,?)", 
-                (q.from_user.id, ttype, amt, wid, "Платеж по долгу", did, now)
-            )
+            conn.execute("INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, debt_id, created_at) VALUES (?,?,?,?,?,?,?)", (q.from_user.id, ttype, amt, wid, "Платеж по долгу", did, now))
             conn.commit()
             return new_bal
         finally:
             conn.close()
-        
+    
     new_bal = await asyncio.to_thread(process_debt_payment)
-    if new_bal is None: 
+    if new_bal is None:
         return await on_cancel(update, context)
-
-    await q.edit_message_text(f"Платеж учтен ✅ Остаток долга: {new_bal:.2f}", 
-                              reply_markup=main_menu_kb(q.from_user.id == ADMIN_ID))
+    
+    await q.edit_message_text(f"Платеж учтен ✅ Остаток долга: {new_bal:.2f}", reply_markup=main_menu_kb())
     return ConversationHandler.END
 
 # ---------------- Корректировка долгов ----------------
 async def debt_adj_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     context.user_data["adj_debt_id"] = int(q.data.split(":")[1])
-    await q.edit_message_text("Введи, какой сейчас по факту остаток долга (например, 5000):", 
-                              reply_markup=cancel_kb(False))
+    await q.edit_message_text("Введи, какой сейчас по факту остаток долга (например, 5000):", reply_markup=cancel_kb(False))
     return DEBT_ADJ_TARGET
 
 async def debt_adj_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     val = money_parse(update.message.text)
     if val is None:
         await update.message.reply_text("Не понял сумму. Введи ещё раз:", reply_markup=cancel_kb(False))
         return DEBT_ADJ_TARGET
     did = context.user_data["adj_debt_id"]
-    
     def fetch_debt_info():
         conn = get_db_connection()
         try:
             return conn.execute("SELECT current_balance, name FROM debts WHERE id=?", (did,)).fetchone()
         finally:
             conn.close()
-        
+    
     old_bal = await asyncio.to_thread(fetch_debt_info)
-
+    
     context.user_data["adj_debt_target"] = val
     context.user_data["adj_debt_old"] = old_bal[0]
     delta = val - old_bal[0]
-    await update.message.reply_text(
-        f"Долг: {html.escape(old_bal[1])}\nВ базе: {old_bal[0]:.2f}\nПо факту: {val:.2f}\n"
-        f"Разница: {delta:.2f}\n\nСохранить корректировку?", 
-        reply_markup=kb_confirm(False), 
-        parse_mode="HTML"
-    )
+    await update.message.reply_text(f"Долг: {html.escape(old_bal[1])}\nВ базе: {old_bal[0]:.2f}\nПо факту: {val:.2f}\nРазница: {delta:.2f}\n\nСохранить корректировку?", reply_markup=kb_confirm(False), parse_mode="HTML")
     return DEBT_ADJ_CONFIRM
 
 async def debt_adj_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     context.user_data["note"] = update.message.text.strip()
     await update.message.reply_text("Коммент добавлен. Сохранить корректировку?", reply_markup=kb_confirm(True))
     return DEBT_ADJ_CONFIRM
@@ -1090,12 +686,7 @@ async def debt_adj_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def debt_adj_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     if q.data == "confirm:back":
         await q.edit_message_text("Введи фактический остаток долга:", reply_markup=cancel_kb(False))
@@ -1112,18 +703,12 @@ async def debt_adj_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
         finally:
             conn.close()
-        await q.edit_message_text("Остаток долга скорректирован ✅", 
-                                  reply_markup=main_menu_kb(q.from_user.id == ADMIN_ID))
+        await q.edit_message_text("Остаток долга скорректирован ✅", reply_markup=main_menu_kb())
         return ConversationHandler.END
 
 # ---------------- КОРРЕКТИРОВКА КОШЕЛЬКОВ ----------------
 async def adjust_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.callback_query.from_user.id
-    
-    if is_user_blocked(user_id):
-        await update.callback_query.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
     await asyncio.to_thread(seed_db, user_id)
     context.user_data.clear()
     kb = kb_wallet_pick(user_id, "adjw", add_back=False)
@@ -1133,28 +718,18 @@ async def adjust_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def adj_pick_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     _, wid = q.data.split(":", 1)
     context.user_data["wallet_id"] = int(wid)
     context.user_data["note"] = None
-    await q.edit_message_text("Введи, сколько на этом кошельке СЕЙЧАС по факту (например: 12500):", 
-                              reply_markup=cancel_kb(False))
+    await q.edit_message_text("Введи, сколько на этом кошельке СЕЙЧАС по факту (например: 12500):", reply_markup=cancel_kb(False))
     return ADJ_TARGET
 
 async def adj_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     user_id = update.message.from_user.id
     target_val = money_parse(update.message.text)
-    if target_val is None: 
+    if target_val is None:
         await update.message.reply_text("Не понял сумму. Пример: 12500 или 12500.50:", reply_markup=cancel_kb(False))
         return ADJ_TARGET
     wid = context.user_data["wallet_id"]
@@ -1164,40 +739,21 @@ async def adj_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current"] = current
     context.user_data["delta"] = delta
     note_show = html.escape(context.user_data.get("note") or "—")
-    await update.message.reply_text(
-        f"В базе: {current:.2f}\nПо факту: {target_val:.2f}\nДельта: {delta:.2f}\n"
-        f"Коммент: {note_show}\n\nСохранить?", 
-        reply_markup=kb_confirm(bool(context.user_data.get("note"))), 
-        parse_mode="HTML"
-    )
+    await update.message.reply_text(f"В базе: {current:.2f}\nПо факту: {target_val:.2f}\nДельта: {delta:.2f}\nКоммент: {note_show}\n\nСохранить?", reply_markup=kb_confirm(bool(context.user_data.get("note"))), parse_mode="HTML")
     return ADJ_CONFIRM
 
 async def adj_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     note = update.message.text.strip()
     context.user_data["note"] = note if note else None
     current, target_val, delta = context.user_data["current"], context.user_data["target"], context.user_data["delta"]
     note_show = html.escape(context.user_data.get("note") or "—")
-    await update.message.reply_text(
-        f"В базе: {current:.2f}\nПо факту: {target_val:.2f}\nДельта: {delta:.2f}\n"
-        f"Коммент: {note_show}\n\nСохранить?", 
-        reply_markup=kb_confirm(note_exists=True), 
-        parse_mode="HTML"
-    )
+    await update.message.reply_text(f"В базе: {current:.2f}\nПо факту: {target_val:.2f}\nДельта: {delta:.2f}\nКоммент: {note_show}\n\nСохранить?", reply_markup=kb_confirm(note_exists=True), parse_mode="HTML")
     return ADJ_CONFIRM
 
 async def adj_confirm_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "cancel": 
+    if q.data == "cancel":
         return await on_cancel(update, context)
     if q.data == "confirm:back":
         await q.edit_message_text("Введи, сколько сейчас по факту:", reply_markup=cancel_kb(False))
@@ -1208,44 +764,29 @@ async def adj_confirm_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     if q.data == "confirm:save":
         delta = context.user_data["delta"]
         if abs(delta) < 1e-9:
-            await q.edit_message_text("Суммы совпадают, корректировка не нужна ✅", 
-                                      reply_markup=main_menu_kb(q.from_user.id == ADMIN_ID))
+            await q.edit_message_text("Суммы совпадают, корректировка не нужна ✅", reply_markup=main_menu_kb())
             return ConversationHandler.END
         ttype = "income" if delta > 0 else "expense"
         now = datetime.now().isoformat(timespec="seconds")
         conn = get_db_connection()
         try:
-            conn.execute(
-                "INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, note, created_at) VALUES (?,?,?,?,?,?,?)", 
-                (q.from_user.id, ttype, abs(delta), context.user_data["wallet_id"], "Корректировка", 
-                 context.user_data.get("note"), now)
-            )
+            conn.execute("INSERT INTO transactions(user_id, ttype, amount, wallet_id, category, note, created_at) VALUES (?,?,?,?,?,?,?)", (q.from_user.id, ttype, abs(delta), context.user_data["wallet_id"], "Корректировка", context.user_data.get("note"), now))
             conn.commit()
         finally:
             conn.close()
-        await q.edit_message_text("Корректировка сохранена ✅", 
-                                  reply_markup=main_menu_kb(q.from_user.id == ADMIN_ID))
+        await q.edit_message_text("Корректировка сохранена ✅", reply_markup=main_menu_kb())
         return ConversationHandler.END
 
 # ---------------- КОШЕЛЬКИ ----------------
 async def wallet_add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
     await asyncio.to_thread(seed_db, q.from_user.id)
     context.user_data.clear()
     await q.edit_message_text("Введи название нового кошелька:", reply_markup=cancel_kb(False))
     return W_ADD_NAME
 
 async def wallet_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_user_blocked(update.message.from_user.id):
-        await update.message.reply_text("Вы заблокированы ❌")
-        return ConversationHandler.END
-    
     name = update.message.text.strip()
     if not name:
         await update.message.reply_text("Название пустое. Введи ещё раз:", reply_markup=cancel_kb(False))
@@ -1253,8 +794,7 @@ async def wallet_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     conn = get_db_connection()
     try:
-        conn.execute("INSERT INTO wallets(user_id, name, is_active, created_at) VALUES (?,?,1,?)", 
-                    (user_id, name, datetime.now().isoformat(timespec="seconds")))
+        conn.execute("INSERT INTO wallets(user_id, name, is_active, created_at) VALUES (?,?,1,?)", (user_id, name, datetime.now().isoformat(timespec="seconds")))
         conn.commit()
     except sqlite3.IntegrityError:
         await update.message.reply_text("Такой кошелёк уже есть. Введи другое:", reply_markup=cancel_kb(False))
@@ -1267,11 +807,6 @@ async def wallet_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def wallet_archive_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
     wallets = get_wallets(q.from_user.id, active_only=True)
     if not wallets:
         await q.edit_message_text("Нет активных кошельков.", reply_markup=wallets_menu_kb())
@@ -1284,17 +819,11 @@ async def wallet_archive_entry(update: Update, context: ContextTypes.DEFAULT_TYP
 async def wallet_archive_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
-    if q.data == "menu:wallets": 
+    if q.data == "menu:wallets":
         return await show_menu(update, context)
     conn = get_db_connection()
     try:
-        conn.execute("UPDATE wallets SET is_active=0 WHERE user_id=? AND id=?", 
-                    (q.from_user.id, int(q.data.split(":")[1])))
+        conn.execute("UPDATE wallets SET is_active=0 WHERE user_id=? AND id=?", (q.from_user.id, int(q.data.split(":")[1])))
         conn.commit()
     finally:
         conn.close()
@@ -1305,14 +834,9 @@ async def wallet_archive_pick(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def main_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    
-    if is_user_blocked(q.from_user.id):
-        await q.answer("Вы заблокированы ❌", show_alert=True)
-        return ConversationHandler.END
-    
     data = q.data
     if data == "menu:home":
-        await q.edit_message_text("🏠 Главное меню:", reply_markup=main_menu_kb(q.from_user.id == ADMIN_ID))
+        await q.edit_message_text("🏠 Главное меню:", reply_markup=main_menu_kb())
         return ConversationHandler.END
     if data == "menu:ops":
         await q.edit_message_text("Выберите тип операции:", reply_markup=ops_menu_kb())
@@ -1340,17 +864,14 @@ async def main_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"\n<b>Итого: {total:.2f}</b>")
         await q.edit_message_text("\n".join(lines), reply_markup=wallets_menu_kb(), parse_mode="HTML")
         return ConversationHandler.END
-    if data == "w:adjust": 
+    if data == "w:adjust":
         return await adjust_entry(update, context)
-    if data == "w:add": 
+    if data == "w:add":
         return await wallet_add_entry(update, context)
-    if data == "w:archive": 
+    if data == "w:archive":
         return await wallet_archive_entry(update, context)
-    if data == "menu:debts": 
+    if data == "menu:debts":
         return await debts_entry(update, context)
-    if data.startswith("admin:"):
-        return await admin_menu(update, context)
-    
     return ConversationHandler.END
 
 # ---------------- MAIN ----------------
@@ -1358,11 +879,10 @@ def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
-
-    # ⚠️ ВАЖНО: pattern должен ловить ВСЕ callback_data
+    
     conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(main_menu_router, pattern=r"^(menu:|ops:|w:|stat:|admin:|cat|confirm|from|to|dpay|dadj|adjw|pw|dw|warch|debt:|back|cancel)"),
+            CallbackQueryHandler(main_menu_router, pattern=r"^(menu:|ops:|w:|stat:|debt:|cat|confirm|from|to|dpay|dadj|adjw|pw|dw|warch|back|cancel)"),
         ],
         states={
             ADD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_amount)],
@@ -1394,8 +914,6 @@ def main():
             DEBT_ADJ_CONFIRM: [CallbackQueryHandler(debt_adj_confirm)],
             W_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_add_name)],
             W_ARCH_PICK: [CallbackQueryHandler(wallet_archive_pick)],
-            ADMIN_MENU: [CallbackQueryHandler(admin_menu)],
-            ADMIN_USERS: [CallbackQueryHandler(admin_menu)],
         },
         fallbacks=[
             CallbackQueryHandler(on_cancel, pattern=r"^cancel$"),
@@ -1403,8 +921,8 @@ def main():
     )
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_text))
-
-    logger.info("Бот успешно запущен!")
+    
+    print("✅ Бот успешно запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
