@@ -166,7 +166,12 @@ async def main_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
     uid = q.from_user.id
 
-    # если пришла кнопка из середины сценария — не очищаем всё, только по конкретным кнопкам
+    # страховка от «висячих» кнопок
+    valid_prefixes = ("menu:", "ops:", "cancel", "w:", "c:")
+    if not data.startswith(valid_prefixes):
+        await q.answer("Не понимаю эту кнопку", show_alert=True)
+        return
+
     if data == "menu:home":
         context.user_data.clear()
         await q.edit_message_text(
@@ -212,6 +217,9 @@ async def main_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # шаг 2: выбор кошелька
     if data.startswith("w:"):
+        if context.user_data.get("step") != "wallet":
+            await q.answer("Неожиданная кнопка кошелька", show_alert=True)
+            return
         wid = int(data.split(":")[1])
         context.user_data["wallet_id"] = wid
         context.user_data["step"] = "category"
@@ -237,15 +245,17 @@ async def main_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # шаг 3: выбор категории
     if data.startswith("c:"):
+        if context.user_data.get("step") != "category":
+            await q.answer("Неожиданная кнопка категории", show_alert=True)
+            return
         cid = int(data.split(":")[1])
         context.user_data["category_id"] = cid
-        context.user_data["step"] = "confirm"
+        context.user_data["step"] = "done"
 
         ttype = context.user_data.get("ttype")
         amount = context.user_data.get("amount")
         wallet_id = context.user_data.get("wallet_id")
 
-        # получаем названия для красивого вывода
         async def fetch_names():
             conn = get_db_connection()
             try:
@@ -279,7 +289,6 @@ async def main_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
 
-    # если мы не в сценарии ввода суммы
     if step != "amount":
         await update.message.reply_text(
             "Жми кнопки 👇", reply_markup=main_menu_kb()
@@ -321,7 +330,12 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CallbackQueryHandler(main_menu_router))
+    app.add_handler(
+        CallbackQueryHandler(
+            main_menu_router,
+            pattern=r"^(menu:|ops:|cancel|w:|c:)"
+        )
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     logger.info("Bot started (wallet + category, no ConversationHandler)")
